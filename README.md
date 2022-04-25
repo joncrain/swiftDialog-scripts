@@ -1,4 +1,4 @@
-# it-cpe-mac-notifications
+# swiftDialog Scripts
 
 Scripts that utilize [swiftDialog](https://github.com/bartreardon/swiftDialog) for various tasks.
 
