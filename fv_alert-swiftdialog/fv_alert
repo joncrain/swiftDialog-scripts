@@ -1,0 +1,59 @@
+#!/bin/zsh
+
+user=$(/usr/bin/stat -f '%u' /dev/console)
+dialog="/usr/local/bin/dialog"
+info_link="https://confluence.company.com/"
+now=$(/bin/date +'%s')
+shown_time=$(/usr/bin/defaults read com.company.notifications fv_alertShownDate 2>/dev/null || echo $(($now-86400)))
+diff=$(($now - $shown_time))
+
+[[ -z "$user" ]] && exit 0
+
+if [[ ! -f ${dialog} ]] then;
+    exit 1
+fi
+
+# Logging out will only work if they user has a secure token:
+if /usr/sbin/sysadminctl -secureTokenStatus $(/usr/bin/whoami) 2>&1 | grep -q "ENABLED"; then
+    enabled="true"
+    message="## Security Alert\n\nPlease logout/login to validate the encryption of your device.\n\nTo verify this message, go to <${info_link}>"
+    button="Logout"
+else
+    # if we have shown the open ticket dialog in less than 24 hours, skip it
+    if (( $diff <  86400 )); then; exit 0; fi
+    enabled="false"
+    message="## Security Alert\n\nWe are unable to enable encryption on your machine.\n\nA member of IT Operations will need to remediate.\n\nPlease open a ticket with IT Support.\n\nTo verify this message, go to <${info_link}>"
+    button="Open Ticket"
+fi
+
+runDialog () {
+    ${dialog} \
+            --title "none" \
+            --alignment "center" \
+            --centericon true \
+            --iconsize "500" \
+            --messagefont "size=16" \
+            --icon '/System/Library/PreferencePanes/Security.prefPane' \
+            --overlayicon caution \
+            --message ${message} \
+            --infobuttontext "More Info" \
+            --infobuttonaction ${info_link} \
+            --button1text ${button} \
+
+    if ${enabled}; then
+        logout_user
+    else
+        open_ticket
+    fi
+}
+
+logout_user () {
+    /bin/launchctl bootout gui/${user}
+}
+
+open_ticket () {
+    /usr/bin/defaults write com.company.notifications fv_alertShownDate -int $(now)
+    /usr/bin/open https://helpdesk.company.com
+}
+
+runDialog

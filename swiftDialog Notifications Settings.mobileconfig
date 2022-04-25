@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadDescription</key>
+			<string>Settings for Company Notifications</string>
+			<key>PayloadDisplayName</key>
+			<string>Company Notifications</string>
+			<key>PayloadEnabled</key>
+			<true/>
+			<key>PayloadIdentifier</key>
+			<string>com.company.notifications</string>
+			<key>PayloadOrganization</key>
+			<string>Company</string>
+			<key>PayloadType</key>
+			<string>com.company.notifications</string>
+			<key>PayloadUUID</key>
+			<string>95F8234B-B6BA-4D6D-ABDF-C0A325C5AC8C</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>global</key>
+			<dict>
+				<key>DIALOG</key>
+				<string>/usr/local/bin/dialog</string>
+				<key>DIALOG_COMMAND_FILE</key>
+				<string>/var/tmp/dialog.log</string>
+				<key>FILE_LOCATION</key>
+				<string>/Library/CPE/</string>
+				<key>TICKET_TEXT</key>
+				<string>IT Support</string>
+				<key>TICKET_LINK</key>
+				<string>https://helpdesk.company.com</string>
+			</dict>
+			<key>nudge</key>
+			<dict>
+				<key>wiki_link</key>
+				<string>https://confluence.company.com/</string>
+				<key>wiki_text</key>
+				<string>More Info</string>
+				<key>requiredMinimumOS11Version</key>
+				<string>11.6.3</string>
+				<key>requiredMinimumOS12Version</key>
+				<string>12.3.2</string>
+				<key>requiredInstallationDate</key>
+				<string>2022-04-18</string>
+			</dict>
+			<key>mdm_check</key>
+			<dict>
+				<key>IDENTITY_CHECK</key>
+				<string>MDM</string>
+			</dict>
+		</dict>
+	</array>
+	<key>PayloadDescription</key>
+	<string>Company Notifications</string>
+	<key>PayloadDisplayName</key>
+	<string>Company Notifications</string>
+	<key>PayloadIdentifier</key>
+	<string>com.company.notifications</string>
+	<key>PayloadOrganization</key>
+	<string>Company</string>
+	<key>PayloadScope</key>
+	<string>System</string>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>A570E304-E319-4BF9-AED5-55C1190CFFD6</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>

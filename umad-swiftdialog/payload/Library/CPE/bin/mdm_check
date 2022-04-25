@@ -1,0 +1,325 @@
+#!/usr/local/munki/munki-python
+
+import datetime
+import json
+import os
+import platform
+import plistlib
+import subprocess
+import sys
+import time
+import webbrowser
+from AppKit import NSWorkspace
+from PyObjCTools import Conversion
+from CoreFoundation import CFPreferencesCopyAppValue, CFPreferencesSetValue
+from Foundation import NSURL, NSLog, kCFPreferencesCurrentUser, kCFPreferencesAnyHost
+from distutils.version import LooseVersion
+from SystemConfiguration import SCDynamicStoreCopyConsoleUser
+
+APP_DOMAIN = "com.company.notifications"
+CONFIG_FILE_URL = "https://cdn.company.com/public/umad/umad.json"
+TODAY = datetime.date.today()
+
+
+class DialogAlert:
+    def __init__(self, config):
+        # set the default look of the alert
+        self.config = config
+        self.content_dict = {
+            "alignment": "center",
+            "button1text": "Close",
+            "centericon": 1,
+            "icon": "caution",
+            "iconsize": "500",
+            "infobuttonaction": config["INFO_LINK"],
+            "infobuttontext": config["INFO_TEXT"],
+            "message": f" ",
+            "messagefont": "size=16",
+            "title": "none",
+        }
+
+    def alert(self, contentDict, background=False):
+        """Runs the SwiftDialog app and returns the exit code"""
+        jsonString = json.dumps(contentDict)
+        bg = ""
+        if background:
+            bg = " &"
+        # os.system is deprecated but makes background calls easier than subprocess
+        exit_code = os.system(
+            f"{self.config['DIALOG']} -o -d --jsonstring '{jsonString}'{bg}"
+        )
+        return exit_code
+
+    def update_dialog(self, command, value=""):
+        """Updates the current dialog window"""
+        with open(self.config["DIALOG_COMMAND_FILE"], "a") as log:
+            log.write(f"{command}: {value}\n")
+
+
+def get_configuration():
+    """
+    Configuration can be loaded from the App Domain (via cfprefs)
+    or by a remote json file.
+    """
+    config = {}
+    global_profile_settings = read_cfprefs_value("global", APP_DOMAIN) or {}
+    app_profile_settings = read_cfprefs_value("mdm_check", APP_DOMAIN) or {}
+    config = config | Conversion.pythonCollectionFromPropertyList(
+        global_profile_settings
+    )
+    config = config | Conversion.pythonCollectionFromPropertyList(app_profile_settings)
+
+    config["CONFIG_FILE_URL"] = config.get("config_file_url", CONFIG_FILE_URL)
+
+    try:
+        remote_file = download_file(CONFIG_FILE_URL)
+    except:
+        remote_file = {}
+
+    config["CUTOFF_DATE"] = config.get(
+        "requiredInstallationDate", remote_file.get("CUTOFF_DATE", "2022-05-25")
+    )
+    config["DELTA_DAYS"] = (
+        datetime.datetime.strptime(config["CUTOFF_DATE"], "%Y-%m-%d").date() - TODAY
+    ).days
+    config["DIALOG_COMMAND_FILE"] = config.get(
+        "DIALOG_COMMAND_FILE", "/var/tmp/dialog.log"
+    )
+    config["ENROLLMENT_URL"] = app_profile_settings.get(
+        "enrollmentUrl",
+        remote_file.get("ENROLLMENT_URL", "https://a.simplemdm.com/enroll/"),
+    )
+    config["FILE_LOCATION"] = config.get("FILE_LOCATION", "/Users/joncrain/Projects/github/swiftDialog-scripts/umad-swiftdialog/payload/Library/CPE/")
+    config["IMG_LOCATION"] = os.path.join(config["FILE_LOCATION"], "imgs")
+    config["DIALOG"] = config.get("DIALOG", "/usr/local/bin/dialog")
+    config["IDENTITY_CHECK"] = app_profile_settings.get(
+        "IDENTITY_CHECK", remote_file.get("IDENTITY_CHECK", "MDM")
+    )
+    config["SLACK_CHANNEL"] = config.get("SLACK_CHANNEL", "#it-support")
+    config["SLACK_LINK"] = config.get(
+        "SLACK_LINK", "slack://channel?team=T06AF9667&id=C06TQGCCC"
+    )
+    config["INFO_LINK"] = config.get(
+        "mdmCheckInfoLink",
+        remote_file.get("INFO_LINK", "https://confluence.company.com/"),
+    )
+    config["INFO_TEXT"] = config.get(
+        "wiki_text", remote_file.get("INFO_TEXT", "More Info")
+    )
+    config["TICKET_TEXT"] = config.get("TICKET_TEXT", "IT Support")
+    config["TICKET_LINK"] = config.get("TICKET_LINK", "https://helpdesk.company.com")
+    return config
+
+
+def download_file(file_url):
+    """Attempts to download a json file at a file_url
+    Returns a dictionary of the json file."""
+    try:
+        cmd = ["/usr/bin/curl", "-s", file_url]
+        json_raw = run_cmd(cmd)[0].decode("utf-8")
+        return json.loads(json_raw)
+    except Exception as err:
+        write_log(f"Unable to download configuration file: {err}")
+        return {}
+
+
+def get_logged_in_user():
+    """Returns the UID of the current logged in user"""
+    user, uid, gid = SCDynamicStoreCopyConsoleUser(None, None, None)
+    return uid
+
+
+def get_os_version():
+    """Return OS version."""
+    return LooseVersion(platform.mac_ver()[0])
+
+
+def identity_check(config):
+    """Check for valid MDM identity will return"""
+    cmd = ["/usr/bin/security", "find-identity", "-v"]
+    output = run_cmd(cmd)[0].decode("utf-8")
+    if config["IDENTITY_CHECK"] in output:
+        return True
+    write_log(f"Valid identity ({config['IDENTITY_CHECK']}) not found")
+    return False
+
+
+def is_dep_enabled():
+    """Check if DEP is enabled"""
+    cloud_record_path = "/private/var/db/ConfigurationProfiles/Settings"
+    good_record = os.path.join(cloud_record_path, ".cloudConfigRecordFound")
+    bad_record = os.path.join(cloud_record_path, ".cloudConfigRecordNotFound")
+    no_activation = os.path.join(cloud_record_path, ".cloudConfigNoActivationRecord")
+    cmd = ["/usr/bin/profiles", "-e"]
+    run_cmd(cmd)
+    if os.path.exists(bad_record) or os.path.exists(no_activation):
+        return False
+    try:
+        with open(good_record, "rb") as f:
+            cloudConfigRecord = plistlib.load(f)
+    except:
+        return False
+    if "CloudConfigFetchError" in cloudConfigRecord:
+        return False
+    return True
+
+
+def read_cfprefs_value(key, app_domain):
+    """Returns a preference value for the specified key and application."""
+    return CFPreferencesCopyAppValue(key, app_domain)
+
+
+def run_cmd(cmd):
+    """Run the cmd"""
+    run = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, err = run.communicate()
+    if err:
+        write_log(err.decode("utf-8"))
+    return output, err
+
+
+def write_log(text):
+    """Logger for mdm_check. Output is controlled by the LaunchDaemon."""
+    NSLog("[mdm_check] " + text)
+
+
+def write_plist(key, value, app_domain):
+    """Adds, modifies, or removes a preference value for the specified domain."""
+    CFPreferencesSetValue(
+        key, value, app_domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost
+    )
+
+
+def main():
+    config = get_configuration()
+
+    if not os.path.exists(config["DIALOG"]):
+        write_log("Dialog does not seem to be installed. Exiting.")
+        sys.exit(1)
+
+    if get_os_version() < LooseVersion("11"):
+        write_log("Not compatible with Catalina and below, please upgrade.")
+        sys.exit(1)
+
+    if identity_check(config):
+        write_log(f"Valid identity found. Found {config['IDENTITY_CHECK']}.")
+        sys.exit(0)
+
+    deferrals = read_cfprefs_value("mdmCheckDeferrals", APP_DOMAIN) or 0
+    activations = read_cfprefs_value("mdmCheckActivations", APP_DOMAIN) or 0
+
+    write_log("Starting User notification")
+
+    write_plist("mdmCheckActivations", activations + 1, APP_DOMAIN)
+    write_plist("mdmCheckLastActivationDate", datetime.datetime.today(), APP_DOMAIN)
+
+    if is_dep_enabled():
+        write_log("Machine is DEP enabled and not managed")
+        step1 = DialogAlert(config)
+        step1.content_dict["button1text"] = "Send Notification"
+        step1.content_dict["message"] = (
+            "## Your MDM enrollment needs updating!\n\n"
+            "Please click **Send Notification** to begin enrollment.\n\n"
+            f"To verify this message, go to <{config['INFO_LINK']}> or "
+            f"[{config['SLACK_CHANNEL']}]({config['SLACK_LINK']}) in Slack."
+        )
+        dep_step1 = step1.alert(step1.content_dict)
+        if dep_step1 == 0:
+            write_log("Running profiles renew command")
+            user_id = str(get_logged_in_user())
+            cmd = [
+                "/bin/launchctl",
+                "asuser",
+                user_id,
+                "/usr/bin/profiles",
+                "renew",
+                "-type",
+                "enrollment",
+            ]
+            run_cmd(cmd)
+        else:
+            sys.exit(dep_step1)
+        final_step = DialogAlert(config)
+        final_step.content_dict["button1disabled"] = True
+        final_step.content_dict["icon"] = f"{config['IMG_LOCATION']}/dep_enroll.png"
+        final_step.content_dict["message"] = (
+            "## Notification has been sent\n\n"
+            "It is located in the Notification Center in the top right corner of your screen.\n\n"
+            "Click on the notification and select **Allow** to finish device management setup."
+        )
+        final_step.alert(final_step.content_dict, True)
+        time.sleep(10)
+        final_step.update_dialog("button1", "enable")
+    else:
+        write_log("Machine is not DEP enabled and not managed")
+        man_step1 = DialogAlert(config)
+        man_step1.content_dict["button1text"] = "Download Profile"
+        man_step1.content_dict["message"] = (
+            "## Your MDM enrollment needs updating!\n\n"
+            "Please click **Download Profile** to download the latest profile.\n\n"
+            f"To verify this message, go to <{config['INFO_LINK']}> or "
+            f"[{config['SLACK_CHANNEL']}]({config['SLACK_LINK']}) in Slack."
+        )
+        manual_step1 = man_step1.alert(man_step1.content_dict)
+        if manual_step1 == 0:
+            url = config["ENROLLMENT_URL"]
+            webbrowser.open_new(url)
+        man_step2 = DialogAlert(config)
+        man_step2.content_dict["button1text"] = "Continue"
+        man_step2.content_dict["icon"] = f"{config['IMG_LOCATION']}/manual.png"
+        man_step2.content_dict["message"] = (
+            "## Please click on Download Enrollment Profile.\n\n"
+            "Open the downloaded mobileconfig file and click on the notification."
+        )
+        manual_step2 = man_step2.alert(man_step2.content_dict)
+        if manual_step2 == 0:
+            sys_pref_link = (
+                "x-apple.systempreferences:com.apple.preferences.configurationprofiles"
+            )
+            workspace = NSWorkspace.sharedWorkspace()
+            workspace.openURL_(NSURL.URLWithString_(sys_pref_link))
+        final_step = DialogAlert(config)
+        final_step.content_dict["button1text"] = "Close"
+        final_step.content_dict["button1disabled"] = True
+        final_step.content_dict["icon"] = f"{config['IMG_LOCATION']}/install.png"
+        final_step.content_dict["message"] = (
+            "## Please click on Install.\n\nEnter your local "
+            "user credentials and click Enroll to finish device management setup."
+        )
+        final_step.alert(final_step.content_dict, True)
+        time.sleep(10)
+        final_step.update_dialog("button1", "enable")
+
+    # Will loop until it finds a valid identity or Dialog is manually closed
+    write_log("Checking identities")
+    while not identity_check(config):
+        time.sleep(5)
+        # Detect if Dialog was manually closed
+        process = run_cmd(["/usr/bin/pgrep", "dialog"])
+        if not process[0]:
+            failure = DialogAlert(config)
+            failure.content_dict["button1text"] = "Defer"
+            failure.content_dict["button2text"] = "Check Again"
+            failure.content_dict["message"] = (
+                "## Enrollment was not completed!\n\n"
+                "We will remind you in an hour to complete again.\n\n"
+                f"Remaining days for enrollment: **{config['DELTA_DAYS']}**\n\n"
+                f"For issues, please log a ticket with [{config['TICKET_TEXT']}]({config['TICKET_LINK']})"
+            )
+            failure_step = failure.alert(failure.content_dict)
+            if failure_step == 0:
+                write_log("User acknowledged incomplete enrollment")
+                write_plist("mdmCheckDeferrals", deferrals + 1, APP_DOMAIN)
+                return
+            else:
+                write_log("Checking again")
+    final_step.update_dialog("quit")
+    success = DialogAlert(config)
+    success.content_dict[
+        "message"
+    ] = "## Success!\n\nThank you for updating your MDM enrollment."
+    success.alert(success.content_dict)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,234 @@
+#!/usr/local/munki/munki-python
+
+import datetime
+import json
+import os
+import platform
+import subprocess
+import sys
+import urllib.request
+from AppKit import NSWorkspace
+from CoreFoundation import CFPreferencesCopyAppValue, CFPreferencesSetValue
+from Foundation import NSURL, NSLog, kCFPreferencesCurrentUser, kCFPreferencesAnyHost
+from PyObjCTools import Conversion
+from distutils.version import LooseVersion
+
+APP_DOMAIN = "com.company.notifications"
+CONFIG_FILE_URL = "https://cdn.company.com/nudge/nudge-swiftdialog.json"
+TODAY = datetime.date.today()
+
+
+class DialogAlert:
+    def __init__(self, config):
+        # set the default look of the alert
+        self.config = config
+        self.content_dict = {
+            "alignment": "center",
+            "button1text": "Update Device",
+            "centericon": 1,
+            "icon": "/System/Library/PreferencePanes/SoftwareUpdate.prefPane",
+            "iconsize": "500",
+            "overlayicon": "caution",
+            "infobuttonaction": config["INFO_LINK"],
+            "infobuttontext": config["INFO_TEXT"],
+            "message": f" ",
+            "messagefont": "size=16",
+            "title": "none",
+        }
+
+    def alert(self, contentDict):
+        """Runs the SwiftDialog app and returns the exit code"""
+        jsonString = json.dumps(contentDict)
+        exit_code = os.system(f"{self.config['DIALOG']} -o --jsonstring '{jsonString}'")
+        return exit_code
+
+
+def get_configuration():
+    """
+    Configuration can be loaded from the App Domain (via cfprefs)
+    or by a remote json file.
+    """
+    config = {}
+    global_profile_settings = read_cfprefs_value("global", APP_DOMAIN) or {}
+    app_profile_settings = read_cfprefs_value("nudge", APP_DOMAIN) or {}
+    config = config | Conversion.pythonCollectionFromPropertyList(
+        global_profile_settings
+    )
+    config = config | Conversion.pythonCollectionFromPropertyList(app_profile_settings)
+
+    config["CONFIG_FILE_URL"] = config.get("config_file_url", CONFIG_FILE_URL)
+
+    try:
+        remote_file = json.loads(download_file(CONFIG_FILE_URL))
+    except:
+        remote_file = {}
+
+    config["CUTOFF_DATE"] = config.get(
+        "requiredInstallationDate", remote_file.get("CUTOFF_DATE", "2022-05-20")
+    )
+    config["DELTA_DAYS"] = (
+        datetime.datetime.strptime(config["CUTOFF_DATE"], "%Y-%m-%d").date() - TODAY
+    ).days
+    config["FILE_LOCATION"] = config.get("FILE_LOCATION", "/Library/CPE/")
+    config["IMG_LOCATION"] = os.path.join(config["FILE_LOCATION"], "imgs")
+    config["DIALOG"] = config.get("DIALOG", "/usr/local/bin/dialog")
+    config["GRACE_PERIOD"] = config.get(
+        "grace_period", remote_file.get("grace_period", 7)
+    )
+    config["INFO_LINK"] = config.get(
+        "mdmCheckInfoLink",
+        remote_file.get("INFO_LINK", "https://confluence.company.com/"),
+    )
+    config["INFO_TEXT"] = config.get(
+        "wiki_text", remote_file.get("INFO_TEXT", "More Info")
+    )
+    config["REQUIRED_13_OS"] = config.get(
+        "requiredMinimumOS13Version",
+        remote_file.get("requiredMinimumOS13Version", "13.0.1"),
+    )
+    config["REQUIRED_12_OS"] = config.get(
+        "requiredMinimumOS12Version",
+        remote_file.get("requiredMinimumOS12Version", "12.3.2"),
+    )
+    config["REQUIRED_11_OS"] = config.get(
+        "requiredMinimumOS11Version",
+        remote_file.get("requiredMinimumOS11Version", "11.6.5"),
+    )
+    config["MAX_DEFERRALS"] = config.get(
+        "max_deferrals",
+        remote_file.get("max_deferrals", 5),
+    )
+    config["TICKET_TEXT"] = config.get("TICKET_TEXT", "IT Support")
+    config["TICKET_LINK"] = config.get("TICKET_LINK", "https://helpdesk.company.com")
+    return config
+
+
+def download_file(file_url):
+    try:
+        json_raw = urllib.request.urlopen(file_url).read()
+    except Exception as err:
+        # urllib can have some issues with certs
+        try:
+            cmd = ["/usr/bin/curl", "-s", file_url]
+            json_raw = run_cmd(cmd)[0].decode("utf-8")
+        except Exception as err:
+            write_log("Unable to download configuration file.")
+            return err
+    return json_raw
+
+
+def get_os_version():
+    """Return OS version."""
+    return LooseVersion(platform.mac_ver()[0])
+
+
+def read_cfprefs_value(key, app_domain):
+    """Returns a preference value for the specified key and application."""
+    return CFPreferencesCopyAppValue(key, app_domain)
+
+
+def run_cmd(cmd):
+    """Run the cmd and returns the output and error"""
+    run = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, err = run.communicate()
+    if err:
+        write_log(err.decode("utf-8"))
+    return output, err
+
+
+def write_log(text):
+    """Logger for nudge. Output is controlled by the LaunchAgent."""
+    NSLog("[nudge] " + text)
+
+
+def write_plist(key, value, app_domain):
+    """Adds, modifies, or removes a preference value for the specified domain."""
+    CFPreferencesSetValue(
+        key, value, app_domain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost
+    )
+
+
+def main():
+    config = get_configuration()
+
+    if not os.path.exists(config["DIALOG"]):
+        write_log("Dialog does not seem to be installed. Exiting.")
+        sys.exit(1)
+
+    current_os = get_os_version()
+
+    if current_os < LooseVersion("11"):
+        write_log("Not compatible with Catalina and below, please upgrade.")
+        sys.exit(1)
+
+    # Get required version for this machine
+    if current_os < LooseVersion("12"):
+        required_os = config["REQUIRED_11_OS"]
+    elif current_os < LooseVersion("13"):
+        required_os = config["REQUIRED_12_OS"]
+    else:
+        required_os = config["REQUIRED_13_OS"]
+
+    if current_os >= LooseVersion(required_os):
+        write_log(f"{current_os} is at the required version ({required_os})")
+        sys.exit(0)
+
+    # Setup grace period for new device
+    initial_setup_date = datetime.datetime.fromtimestamp(
+        os.stat("/private/var/db/.AppleSetupDone").st_birthtime
+    )
+    if (TODAY - initial_setup_date.date()).days < config["GRACE_PERIOD"]:
+        write_log(f"Machine is in the grace period for new devices.")
+        sys.exit(0)
+
+    # Setup deferrals
+    deferrals = read_cfprefs_value("nudgeDeferrals", APP_DOMAIN) or 0
+    activations = read_cfprefs_value("nudgeActivations", APP_DOMAIN) or 0
+
+    if deferrals < config["MAX_DEFERRALS"]:
+        write_log(f"Current number of deferrals: {deferrals}")
+        deferrals_left = config["MAX_DEFERRALS"] - deferrals
+    else:
+        write_log("User has no deferrals left")
+        deferrals_left = config["MAX_DEFERRALS"] - deferrals
+
+    # Start notifications
+    write_log("Starting User notification")
+
+    write_plist("nudgeActivations", activations + 1, APP_DOMAIN)
+    write_plist("nudgeLastActivationDate", datetime.datetime.today(), APP_DOMAIN)
+
+    step1 = DialogAlert(config)
+    if deferrals_left > 0:
+        step1.content_dict["button2text"] = "Later"
+    step1.content_dict["message"] = ("## Your device requires a security update\n\n"
+        f"Days Remaining to Update: **{config['DELTA_DAYS']}**   "
+        f"Remaining Deferrals: **{deferrals_left}**\n\n"
+        f"Your OS version: **{current_os}**   Required version: **{required_os}**\n\n"
+        f"To verify this message, go to <{config['INFO_LINK']}>")
+    run_step1 = step1.alert(step1.content_dict)
+
+    if run_step1 != 0:
+        write_log("User deferred")
+        deferral_step = DialogAlert(config)
+        deferral_step.content_dict["button1text"] = "Defer"
+        deferral_step.content_dict["button2text"] = "Update Now"
+        deferral_step.content_dict["message"] = ("## Update was not completed!\n\n"
+            "We will remind you tomorrow to complete again.\n\n"
+            f"Remaining days for update: **{config['DELTA_DAYS']}**   "
+            f"Remaining Deferrals: **{deferrals_left}**\n\n"
+            f"For issues, please log a ticket with [{config['TICKET_TEXT']}]({config['TICKET_LINK']})")
+        run_deferral_step = deferral_step.alert(deferral_step.content_dict)
+        if run_deferral_step == 0:
+            write_log("User acknowledged incomplete enrollment")
+            write_plist("nudgeDeferrals", deferrals + 1, APP_DOMAIN)
+            sys.exit()
+
+    write_log("User clicked update device or quit the app")
+    sys_pref_link = "x-apple.systempreferences:com.apple.preferences.softwareupdate"
+    workspace = NSWorkspace.sharedWorkspace()
+    workspace.openURL_(NSURL.URLWithString_(sys_pref_link))
+
+
+if __name__ == "__main__":
+    main()

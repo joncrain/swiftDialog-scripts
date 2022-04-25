@@ -1,0 +1,35 @@
+#!/bin/zsh
+
+launchd_plist_name='com.company.migration-alert'
+
+# Base paths
+launchd_base_path='Library/LaunchAgents/'
+base_check_path='Library/CPE/'
+
+# As needed through script, logged in user is variable below
+loggedInUser=$( ls -l /dev/console | /usr/bin/awk '{print $3}' )
+
+# Get loggedInUser ID
+userID=$( /usr/bin/id -u $loggedInUser )
+
+# Load agent if installing to a running system
+if [[ $3 == "/" ]] ; then
+  # Fail the install if the admin forgets to change their paths and they don't exist.
+  if [ ! -e "$3${launchd_base_path}${launchd_plist_name}.plist" ]; then
+    # LaunchDaemons missing, exiting
+    exit 1
+  fi
+
+  # Make the Log path 777 to cheat - do this before loading LaunchAgent
+  /bin/mkdir -p "$3${base_check_path}Logs"
+  /bin/chmod -R 777 "$3${base_check_path}Logs"
+
+  # Attempt to unload the DEP daemon if it's already loaded
+  /bin/launchctl asuser "$userID" /bin/launchctl list | /usr/bin/grep $launchd_plist_name
+  if [[ $? -eq 0 ]]; then
+    /bin/launchctl bootout gui/$userID/${launchd_plist_name}
+  fi
+
+  # Enable the LaunchDaemons
+  /bin/launchctl bootstrap gui/$userID "$3${launchd_base_path}${launchd_plist_name}.plist"
+fi

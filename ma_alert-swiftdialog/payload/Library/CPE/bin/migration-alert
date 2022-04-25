@@ -1,0 +1,97 @@
+#!/usr/local/munki/munki-python
+
+"""
+Alert is used to warn users who open Migration Assistant to not transfer
+the System & Network. Class code based off of
+https://github.com/erikberglund/AppBlocker/blob/master/AppBlocker.py
+"""
+
+import json
+import os
+import platform
+import subprocess
+import sys
+import re
+from PyObjCTools import AppHelper
+from AppKit import NSWorkspace, NSObject
+from Foundation import NSLog, NSWorkspace
+from distutils.version import LooseVersion
+
+
+FILE_LOCATION = "/Library/CPE/"
+IMG_LOCATION = os.path.join(FILE_LOCATION, "imgs")
+DIALOG = "/usr/local/bin/dialog"
+DIALOG_COMMAND_FILE = "/var/tmp/dialog.log"
+INFO_LINK = "https://confluence.company.com/"
+INFO_TEXT = "More Info"
+TICKET_TEXT = "IT Support"
+TICKET_LINK = "https://helpdesk.company.com"
+BUNDLE_ID = "com.apple.MigrateAssistant"
+
+# Define callback for notification
+class AppLaunch(NSObject):
+    def appLaunched_(self, notification):
+        # Store the userInfo dict from the notification
+        userInfo = notification.userInfo
+        # Get the launched applications bundle identifier
+        bundleIdentifier = userInfo()["NSApplicationBundleIdentifier"]
+        # Check if launched app's bundle identifier matches any 'blockedBundleIdentifiers'
+        if re.match(BUNDLE_ID, bundleIdentifier):
+            alert()
+
+
+def alert():
+    if not os.path.exists(DIALOG):
+        write_log("Dialog does not seem to be installed. Exiting.")
+        sys.exit(1)
+
+    alert_dict = {
+        "alignment": "center",
+        "button1text": "Continue",
+        "centericon": 1,
+        "icon": "/System/Applications/Utilities/Migration Assistant.app",
+        "iconsize": "500",
+        "infobuttonaction": INFO_LINK,
+        "infobuttontext": INFO_TEXT,
+        "messagefont": "size=16",
+        "message": ("## Using Migration Assistant at Company\n\n"
+            "To ensure that your data is transferred successfully,\n\n"
+            "press **Continue** to read the Migration Assistant notes.\n\n"
+            f"Please see <{INFO_LINK}> for more information."),
+        "title": "none",
+    }
+
+    write_log("Starting User notification")
+    run_dialog(alert_dict)
+
+    alert_dict["button1text"] = "I Understand"
+    alert_dict["icon"] = f"{IMG_LOCATION}/transfer.png"
+    alert_dict[
+        "message"
+    ] = ("## When Selecting the Information to Transfer\n\n"
+        "Do **not** transfer **company Admin** and **System & Network**\n\n"
+        f"If you have any questions about this process, please create a ticket with [{TICKET_TEXT}]({TICKET_LINK})")
+    run_dialog(alert_dict)
+
+
+def run_dialog(contentDict):
+    """Runs the SwiftDialog app and returns the exit code"""
+    jsonString = json.dumps(contentDict)
+    exit_code = os.system(f"{DIALOG} -p -d --jsonstring '{jsonString}'")
+    return exit_code
+
+
+def write_log(text):
+    """Logger for ma_alert. Output is controlled by the LaunchAgent."""
+    NSLog("[migration-alert] " + text)
+
+
+# Register for 'NSWorkspaceDidLaunchApplicationNotification' notifications
+nc = NSWorkspace.sharedWorkspace().notificationCenter()
+AppLaunch = AppLaunch.new()
+nc.addObserver_selector_name_object_(
+    AppLaunch, "appLaunched:", "NSWorkspaceWillLaunchApplicationNotification", None
+)
+
+# Launch "app"
+AppHelper.runConsoleEventLoop()
