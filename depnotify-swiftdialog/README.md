@@ -2,8 +2,6 @@
 
 DEPnotify type workflow with optional software selection.
 
-![Example](./screenshots/example.mov)
-
 ## Welcome
 
 ![Welcome](./screenshots/welcome.png)
@@ -19,3 +17,6 @@ DEPnotify type workflow with optional software selection.
 ## Final
 
 ![Final](./screenshots/final.png)
+
+
+![Example](./screenshots/example.mov)
