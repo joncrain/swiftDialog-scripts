@@ -69,7 +69,7 @@ def alert():
     alert_dict[
         "message"
     ] = ("## When Selecting the Information to Transfer\n\n"
-        "Do **not** transfer **company Admin** and **System & Network**\n\n"
+        "Do **not** transfer **System & Network**\n\n"
         f"If you have any questions about this process, please create a ticket with [{TICKET_TEXT}]({TICKET_LINK})")
     run_dialog(alert_dict)
 
