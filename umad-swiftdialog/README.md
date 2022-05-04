@@ -1,6 +1,6 @@
 # umad-swiftdialog
 
-Conceptually built off of umad from Erik Gomez.
+Conceptually built off of [umad](https://github.com/macadmins/umad) from Erik Gomez.
 
 ## DEP Enrollment
 
