@@ -6,7 +6,6 @@ import os
 import platform
 import subprocess
 import sys
-import urllib.request
 from AppKit import NSWorkspace
 from CoreFoundation import CFPreferencesCopyAppValue, CFPreferencesSetValue
 from Foundation import NSURL, NSLog, kCFPreferencesCurrentUser, kCFPreferencesAnyHost
@@ -104,17 +103,15 @@ def get_configuration():
 
 
 def download_file(file_url):
+    """Attempts to download a json file at a file_url
+    Returns a dictionary of the json file."""
     try:
-        json_raw = urllib.request.urlopen(file_url).read()
+        cmd = ["/usr/bin/curl", "-s", file_url]
+        json_raw = run_cmd(cmd)[0].decode("utf-8")
+        return json.loads(json_raw)
     except Exception as err:
-        # urllib can have some issues with certs
-        try:
-            cmd = ["/usr/bin/curl", "-s", file_url]
-            json_raw = run_cmd(cmd)[0].decode("utf-8")
-        except Exception as err:
-            write_log("Unable to download configuration file.")
-            return err
-    return json_raw
+        write_log(f"Unable to download configuration file: {err}")
+        return {}
 
 
 def get_os_version():
