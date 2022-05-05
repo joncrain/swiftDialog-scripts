@@ -54,10 +54,12 @@ def alert():
         "infobuttonaction": INFO_LINK,
         "infobuttontext": INFO_TEXT,
         "messagefont": "size=16",
-        "message": ("## Using Migration Assistant at Company\n\n"
+        "message": (
+            "## Using Migration Assistant at Company\n\n"
             "To ensure that your data is transferred successfully,\n\n"
             "press **Continue** to read the Migration Assistant notes.\n\n"
-            f"Please see <{INFO_LINK}> for more information."),
+            f"Please see <{INFO_LINK}> for more information."
+        ),
         "title": "none",
     }
 
@@ -66,11 +68,11 @@ def alert():
 
     alert_dict["button1text"] = "I Understand"
     alert_dict["icon"] = f"{IMG_LOCATION}/transfer.png"
-    alert_dict[
-        "message"
-    ] = ("## When Selecting the Information to Transfer\n\n"
+    alert_dict["message"] = (
+        "## When Selecting the Information to Transfer\n\n"
         "Do **not** transfer **System & Network**\n\n"
-        f"If you have any questions about this process, please create a ticket with [{TICKET_TEXT}]({TICKET_LINK})")
+        f"If you have any questions about this process, please create a ticket with [{TICKET_TEXT}]({TICKET_LINK})"
+    )
     run_dialog(alert_dict)
 
 
