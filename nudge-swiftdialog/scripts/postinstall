@@ -20,6 +20,8 @@ if [[ $3 == "/" ]] ; then
     exit 1
   fi
 
+  /bin/chmod 666 "$3${base_check_path}Logs/nudge.log"
+
   # Attempt to unload the DEP daemon if it's already loaded
   /bin/launchctl asuser "$userID" /bin/launchctl list | /usr/bin/grep $launchd_plist_name
   if [[ $? -eq 0 ]]; then
