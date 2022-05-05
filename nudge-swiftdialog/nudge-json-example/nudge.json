@@ -1,0 +1,6 @@
+{
+  "grace_period": 7,
+  "requiredMinimumOS13Version": "13.0.1",
+  "requiredMinimumOS12Version": "12.4",
+  "INFO_LINK": "https://confluence.company.com/"
+}
