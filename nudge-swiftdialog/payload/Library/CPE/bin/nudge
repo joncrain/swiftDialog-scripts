@@ -58,7 +58,7 @@ def get_configuration():
     config["CONFIG_FILE_URL"] = config.get("config_file_url", CONFIG_FILE_URL)
 
     try:
-        remote_file = json.loads(download_file(CONFIG_FILE_URL))
+        remote_file = download_file(CONFIG_FILE_URL)
     except:
         remote_file = {}
 
