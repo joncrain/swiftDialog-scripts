@@ -34,6 +34,7 @@ IMG_LOCATION = os.path.join(FILE_LOCATION, "imgs")
 MUNKI_ICONS = "https://munki.company.com/icons/"
 TICKET_TEXT = "IT Support"
 TICKET_LINK = "https://helpdesk.company.com"
+LOG_FILE = f"{FILE_LOCATION}Logs/bootstrap.log"
 
 
 class DialogAlert:
@@ -69,19 +70,18 @@ class DialogAlert:
     def alert(self, contentDict, background=False):
         """Runs the SwiftDialog app and returns the exit code"""
         jsonString = json.dumps(contentDict)
-        bg = ""
-        if background:
-            bg = " &"
-        exit_code = os.system(f"{DIALOG} -o --jsonstring '{jsonString}'{bg}")
-        return exit_code
-
-    def alert_subp(self, contentDict):
-        """Runs the SwiftDialog app and returns the exit code"""
-        jsonString = json.dumps(contentDict)
-        write_log(jsonString)
         cmd = [DIALOG, "-o", "--jsonstring", jsonString, "--json"]
-        result = run_subp(cmd)
-        return result
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if background:
+            return proc
+        (out, err) = proc.communicate(input)
+        result_dict = {
+            "stdout": out,
+            "stderr": err,
+            "status": proc.returncode,
+            "success": True if proc.returncode == 0 else False,
+        }
+        return result_dict
 
     def install_apps(self, app_dict):
         i = 1
@@ -198,9 +198,10 @@ def process_apps_to_install(apps_to_install, message):
     run_munki.app_install_dict["listitem"] = list_of_apps
     run_munki.app_install_dict["message"] = message
     write_log(f"Alert for {message}")
-    run_munki.alert(run_munki.app_install_dict, True)
+    proc = run_munki.alert(run_munki.app_install_dict, True)
     run_munki.install_apps(apps_to_install)
     update_dialog("quit")
+    proc.terminate()
 
 
 def read_modcount(plist_path):
@@ -289,11 +290,17 @@ def update_self_service_manifest(apps_to_install):
 
 def write_log(text):
     """logger for depnotify"""
-    NSLog("[depnotify] " + text)
+    line = f"[depnotify] {text}\n"
+    with open(LOG_FILE, "a") as the_file:
+        the_file.write(line)
 
 
 def main():
-    munki_thread = threading.Thread(target=run_munki, args=["bootstrap-dev"]).start()
+    LOG_FILE_PATH = os.path.dirname(LOG_FILE)
+    if not os.path.exists(LOG_FILE_PATH):
+        os.makedirs(LOG_FILE_PATH)
+
+    threading.Thread(target=run_munki, args=["bootstrap-dev"]).start()
 
     if not os.path.exists(DIALOG):
         write_log("Dialog does not seem to be installed. Exiting.")
@@ -373,7 +380,11 @@ def main():
 
     optional_apps = {
         "Firefox": {"munki_name": "Firefox", "default": False},
-        "Google Chrome": {"munki_name": "GoogleChrome", "default": True, "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Google_Chrome_icon_%28September_2014%29.svg/512px-Google_Chrome_icon_%28September_2014%29.svg.png?20200318094909"},
+        "Google Chrome": {
+            "munki_name": "GoogleChrome",
+            "default": True,
+            "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Google_Chrome_icon_%28September_2014%29.svg/512px-Google_Chrome_icon_%28September_2014%29.svg.png?20200318094909",
+        },
         "Google Drive for Desktop": {
             "munki_name": "googledrivefilestream",
             "default": False,
@@ -408,12 +419,18 @@ def main():
         "Unsure of what to choose? Leave the defaults and install additional software later."
     )
     write_log("Alert for optional software")
-    results = app_chooser.alert_subp(app_chooser.app_install_dict)
-    write_log(json.dumps(json.loads(results["stdout"].decode("utf-8"))))
+    results = app_chooser.alert(app_chooser.app_install_dict)
+    # Dialog is currently piping some internal errors to stdout when run as a root launchd
+    # This is a workaround to strip those errors from the output of the checkbox selection
+    # Once the results["stdout"] returns valid json, we could remove the workaround.
+    write_log(f"Subprocess results: {results}")
+    stdout = results["stdout"].decode("utf-8")
+    stdout_json = stdout[stdout.index("{") :]
+    write_log(f"Subprocess stdout cleaned: {json.loads(stdout_json)}")
     choosen_apps = {}
     if results["status"] == 0:
         write_log("User has selected continue")
-        choosen_apps = json.loads(results["stdout"].decode("utf-8"))
+        choosen_apps = json.loads(stdout_json)
     # Timer set for 10 minutes, if user doesn't select, we will install the defaults.
     elif results["status"] == 4:
         write_log("User has reached the timeout, moving on with defaults.")
@@ -444,7 +461,7 @@ def main():
             "You can install more software by visiting the Manage Software Center."
         )
         final_step_result = final_step.alert(final_step.content_dict)
-        if final_step_result == 512:
+        if final_step_result["status"] == 512:
             os.system("open /Applications/Managed\ Software\ Center.app")
     else:
         final_step.content_dict["button1text"] = "Log out"
@@ -454,7 +471,7 @@ def main():
             "Please click **Log out** to complete the setup."
         )
         final_step_result = final_step.alert(final_step.content_dict)
-        if final_step_result == 0:
+        if final_step_result["status"] == 0:
             logout(userid)
     write_log("Loading munki")
     load_munki(userid)
