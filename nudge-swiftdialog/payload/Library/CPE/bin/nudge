@@ -13,7 +13,7 @@ from PyObjCTools import Conversion
 from distutils.version import LooseVersion
 
 APP_DOMAIN = "com.company.notifications"
-CONFIG_FILE_URL = "https://cdn.company.com/nudge/nudge-swiftdialog.json"
+CONFIG_FILE_URL = "https://raw.githubusercontent.com/joncrain/swiftDialog-scripts/main/nudge-swiftdialog/nudge-json-example/nudge.json"
 TODAY = datetime.date.today()
 
 
