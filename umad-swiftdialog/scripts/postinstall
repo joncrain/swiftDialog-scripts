@@ -1,25 +1,12 @@
 #!/bin/zsh
 
-launchd_plist_name='com.company.mdm_check'
+launchd_plist_name='com.unity3d.itops.mdm_check'
 
-# Base paths
-launchd_base_path='Library/LaunchDaemons/'
-base_check_path='Library/CPE/'
+/bin/mkdir -p "/Library/CPE/Logs"
+/bin/chmod -R 777 "/Library/CPE/Logs"
 
-# Load agent if installing to a running system
-if [[ $3 == "/" ]] ; then
-  # Fail the install if the admin forgets to change their paths and they don't exist.
-  if [ ! -e "$3${launchd_base_path}${launchd_plist_name}.plist" ]; then
-    # LaunchDaemons missing, exiting
-    exit 1
-  fi
-
-  # Attempt to unload the DEP daemon if it's already loaded
-  /bin/launchctl list | /usr/bin/grep $launchd_plist_name
-  if [[ $? -eq 0 ]]; then
-    /bin/launchctl bootout system/${launchd_plist_name}
-  fi
-
-  # Enable the LaunchDaemons
-  /bin/launchctl bootstrap system "$3${launchd_base_path}${launchd_plist_name}.plist"
+if /bin/launchctl list $launchd_plist_name &> /dev/null; then
+    /bin/echo "Unloading previous mdm_check job..."
+    /bin/launchctl bootout system/$launchd_plist_name
 fi
+/bin/launchctl bootstrap system "/Library/LaunchDaemons/${launchd_plist_name}.plist"
