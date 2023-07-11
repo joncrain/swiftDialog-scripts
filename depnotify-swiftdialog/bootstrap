@@ -1,0 +1,873 @@
+#!/usr/local/munki/munki-python
+
+import concurrent.futures
+import json
+import logging
+import os
+import platform
+import plistlib
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/munki")
+from dataclasses import dataclass
+from pathlib import Path
+
+from Foundation import (
+    CFPreferencesSetValue,
+    NSBundle,
+    NSLocale,
+    NSString,
+    kCFPreferencesAnyHost,
+    kCFPreferencesAnyUser,
+)
+from munkilib.pkgutils import MunkiLooseVersion
+from objc import loadBundleFunctions
+from SystemConfiguration import SCDynamicStoreCopyConsoleUser
+
+DIALOG = "/usr/local/bin/dialog"
+DIALOG_COMMAND_FILE = "/var/tmp/dialog.log"
+FILE_LOCATION = "/Library/CPE/"
+IMG_LOCATION = os.path.join(FILE_LOCATION, "imgs")
+MUNKI_ICONS = "https://munki.server.com/icons/"
+TICKET_TEXT = "IT Support"
+TICKET_LINK = "https://helpdesk.company.com"
+
+message_common_values = {
+    "close": "Close",
+    "continue": "Continue",
+    "device_management": "Company Device Management",
+    "failed": "Failed",
+    "failed_to_install": "failed to install.",
+    "infobuttontext": "Beyond Identity",
+    "install_selected": "Installing the selected applications:",
+    "installed": "Installed",
+    "installing": "Installing",
+    "installing_app": "Installing",
+    "log_out": "Log out",
+    "message_error": f"## The IT notification system has experienced an error.\n\nPlease log a ticket with [{TICKET_TEXT}]({TICKET_LINK})",
+    "message_final_logout": "## Thank you for setting up your machine\n\nPlease click **Log out** to complete the setup.",
+    "message_optional": "## Please select the basic apps to install:\n\nUnsure of what to choose? Leave the defaults and install additional software later.",
+    "message_required": "Installing the required management and security applications:",
+    "message_welcome": "## Welcome to Company!\n\nPlease wait while we install the required system and security software.",
+    "msc": "Managed Software Center",
+    "skip_optional_installs": "Skip Optional Installs",
+    "status": "Pending",
+    "status_text": "Waiting to install...",
+    "title": "Setting up your Mac",
+    "wait": "Please Wait",
+    "wallpaper": "Set Company Wallpaper",
+}
+
+MESSAGE_LOCALE = {
+    "fr": {
+        "close": "Fermer",
+        "continue": "Continuez",
+        "device_management": "Gestion de l'appareil Company",
+        "failed": "Échec",
+        "failed_to_install": "échec de l'installation.",
+        "infobuttontext": "Beyond Identity",
+        "install_selected": "Installation des applications sélectionnées:",
+        "installed": "Installé",
+        "installing": "Installation",
+        "installing_app": "Installation de",
+        "log_out": "Fermer la session",
+        "msc": "Centre de gestion des logiciels",
+        "message_error": f"## Le système de notification TI à subi une erreur.\n\nVeuillez ouvrir un billet avec le [support TI]({TICKET_LINK})",
+        "message_final": "## Votre appareil macOS est prêt\n\nApprenez-en plus: [Gestion d'appareil chez Company](https://confluence.company.com/x/-S_MB)\n\nInstaller plus de logiciels: [Centre de gestion des logiciels](munki://category-all)\n\nConfigurer vos accréditations de Beyond Identity: [Beyond Identity](beyond-identity-endpoint://open)",
+        "message_final_logout": "## Merci d'avoir configuré votre machine\n\nVeuillez cliquer sur **Se déconnecter** pour terminer la configuration",
+        "message_optional": "## Veuillez choisir vos applications de base:\n\nIncertain(e) de votre choix? Laissez tout par défaut et installez-les plus tard.",
+        "message_required": "Installation des logiciels d'administration et de sécurité:",
+        "message_welcome": "## Bienvenue chez Company!\n\nVeuillez patienter pendant que nous installons le système et les logiciels de sécurité.",
+        "skip_optional_installs": "Ignorer les installations facultatives",
+        "status": "En attente",
+        "status_text": "En attente d'installation...",
+        "title": "Configuration de votre Mac",
+        "wait": "Veuillez patienter",
+        "wallpaper": "Changer votre fond d'écran pour Company",
+    },
+    "en": {
+        **message_common_values,
+        "message_final": "## Your macOS device is ready to use.\n\nLearn more: [Device Management at Company](https://confluence.company.com/x/-S_MB)\n\nInstall more software: [Managed Software Center](munki://category-all)\n\nSetup your Beyond Identity credential: [Beyond Identity](beyond-identity-endpoint://open)",
+        "msc": "Managed Software Center",
+    },
+    "gb": {
+        **message_common_values,
+        "message_final": "## Your macOS device is ready to use.\n\nLearn more: [Device Management at Company](https://confluence.company.com/x/-S_MB)\n\nInstall more software: [Managed Software Centre](munki://category-all)\n\nSetup your Beyond Identity credential: [Beyond Identity](beyond-identity-endpoint://open)",
+        "msc": "Managed Software Centre",
+    },
+}
+
+
+class DialogAlert:
+    def __init__(self, lang):
+        # set the default look of the alert
+        self.content_dict = {
+            "alignment": "center",
+            "button1text": MESSAGE_LOCALE[lang]["continue"],
+            "centericon": 1,
+            "height": "400",
+            "icon": f"{IMG_LOCATION}/company-logo.png",
+            "iconsize": "500",
+            "message": MESSAGE_LOCALE[lang]["message_error"],
+            "messagefont": "size=16",
+            "title": "none",
+            "quitkey": "x",
+        }
+        self.app_install_dict = {
+            "alignment": "left",
+            "button1text": MESSAGE_LOCALE[lang]["wait"],
+            "height": "400",
+            "hidetimerbar": True,
+            "icon": "/System/Library/CoreServices/Installer.app/Contents/Resources/AppIcon.icns",
+            "iconsize": "250",
+            "message": MESSAGE_LOCALE[lang]["message_error"],
+            "messagefont": "size=16",
+            "title": MESSAGE_LOCALE[lang]["title"],
+            "quitkey": "x",
+        }
+
+    def alert(self, contentDict, background=False):
+        """Runs the SwiftDialog app and returns the exit code"""
+        jsonString = json.dumps(contentDict)
+        cmd = [DIALOG, "-o", "-p", "--jsonstring", jsonString, "--json"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+        if background:
+            return proc
+        (out, err) = proc.communicate()
+        result_dict = {
+            "stdout": out,
+            "stderr": err,
+            "status": proc.returncode,
+            "success": True if proc.returncode == 0 else False,
+        }
+        return result_dict
+
+    def update_dialog(self, command, value=""):
+        """Updates the current dialog window"""
+        with open(DIALOG_COMMAND_FILE, "a") as dialog_file:
+            dialog_file.write(f"{command}: {value}\n")
+
+    def update_install_dialog(self, title, status, status_text):
+        self.update_dialog(
+            "listitem", f"title: {title}, status: {status}, statustext: {status_text}"
+        )
+
+
+@dataclass
+class App:
+    name: str
+    munki_name: str = None
+    default: bool = True
+    icon: str = None
+    function: str = None
+    name_on_disk: str = None
+    app_location: str = None
+    required: bool = False
+    selected: bool = False
+    status: str = MESSAGE_LOCALE["en"]["status"]
+    status_text: str = MESSAGE_LOCALE["en"]["status_text"]
+
+    def __post_init__(self):
+        if self.munki_name is None:
+            self.munki_name = self.name
+
+        if self.icon is None:
+            self.icon = f"{MUNKI_ICONS}{self.munki_name}.png"
+
+        if self.name_on_disk is None:
+            self.name_on_disk = self.name
+
+        if self.app_location is None:
+            self.app_location = f"/Applications/{self.name_on_disk if self.name_on_disk else self.name}.app"
+
+    def install_app(self, MESSAGE_LOCALE, lang, progress, alert):
+        time.sleep(1)
+        alert.update_dialog("progress", progress)
+        alert.update_dialog("icon", self.icon)
+        alert.update_dialog(
+            "progresstext",
+            f"{MESSAGE_LOCALE[lang]['installing_app']} {self.name}",
+        )
+        alert.update_install_dialog(
+            self.name, "wait", MESSAGE_LOCALE[lang]["installing"]
+        )
+        function_mappings = {
+            "enable_firewall": enable_firewall,
+            "set_wallpaper": set_wallpaper,
+        }
+
+        if self.function in function_mappings:
+            function_mappings[self.function]()
+
+        time.sleep(0.5)
+        # put a timeout in place for apps so that we don't hang forever
+        app_install_timeout = 600
+        for _ in range(app_install_timeout):
+            if os.path.exists(self.app_location):
+                break
+            logging.debug(f"Waiting for {self.name} to install.")
+            time.sleep(0.5)
+        else:
+            logging.debug(f"Timeout reached for {self.name}.")
+        if not os.path.exists(self.app_location):
+            logging.debug(f"Failed to install {self.name}.")
+            alert.update_install_dialog(
+                self.name, "fail", MESSAGE_LOCALE[lang]["failed"]
+            )
+            alert.update_dialog(
+                "progresstext",
+                f"{self.name} {MESSAGE_LOCALE[lang]['failed_to_install']}",
+            )
+        progress += 1
+        alert.update_dialog("progress", progress)
+        alert.update_install_dialog(
+            self.name, "success", MESSAGE_LOCALE[lang]["installed"]
+        )
+        alert.update_dialog(
+            "progresstext",
+            f"{self.name} {MESSAGE_LOCALE[lang]['installed'].lower()}.",
+        )
+        return progress + 1
+
+
+class Applications:
+    def __init__(self, lang):
+        self.lang = lang
+        self.apps = [
+            App(
+                name="Beyond Identity",
+                munki_name="BeyondIdentity",
+                default=True,
+                required=True,
+            ),
+            App(
+                name="CrowdStrike Falcon",
+                munki_name="FalconSensor",
+                name_on_disk="Falcon",
+                required=True,
+            ),
+            App(
+                name="Enabling Firewall",
+                function="enable_firewall",
+                icon="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/ToolbarCustomizeIcon.icns",
+                app_location="/Users/Shared/.firewall_enabled",
+                required=True,
+            ),
+            App(
+                name="FileVault Encryption",
+                icon="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/FileVaultIcon.icns",
+                app_location="/Library/Crypt/checkin",
+                required=True,
+            ),
+            App(
+                name=MESSAGE_LOCALE[lang]["msc"],
+                munki_name="munkitools",
+                name_on_disk="Managed Software Center",
+                required=True,
+            ),
+            App(
+                name=MESSAGE_LOCALE[lang]["device_management"],
+                munki_name="sal_scripts",
+                app_location="/usr/local/sal/bin/sal-submit",
+                icon=f"{MUNKI_ICONS}company_logo.png",
+                required=True,
+            ),
+            App("Firefox", munki_name="Firefox", default=False),
+            App("Google Chrome", munki_name="GoogleChrome"),
+            App(
+                "Google Drive for Desktop",
+                munki_name="googledrivefilestream",
+                default=False,
+                name_on_disk="Google Drive",
+            ),
+            App(
+                "GlobalProtect VPN",
+                munki_name="globalprotect",
+                name_on_disk="GlobalProtect",
+            ),
+            App(
+                MESSAGE_LOCALE[lang]["wallpaper"],
+                function="set_wallpaper",
+                icon=f"{MUNKI_ICONS}company_logo.png",
+                app_location="/Users/Shared/.wallpaper_set",
+            ),
+            App("Slack", munki_name="slack"),
+            App("Unity Hub", munki_name="UnityHub", default=False),
+            App("Visual Studio Code", munki_name="VisualStudioCode", default=False),
+            App("Zoom", munki_name="Zoom", name_on_disk="zoom.us"),
+        ]
+
+    def change_app_value(self, app_name, attribute, new_value):
+        for app in self.apps:
+            if app.name == app_name:
+                setattr(app, attribute, new_value)
+                break
+
+    def get_required_apps(self):
+        return [app for app in self.apps if app.required]
+
+    def get_optional_apps(self):
+        return [
+            {"label": app.name, "checked": app.default, "icon": app.icon}
+            for app in self.apps
+            if not app.required
+        ]
+
+    def get_selected_apps(self):
+        return [app for app in self.apps if app.selected]
+
+    def process_apps(self, apps, message, munki_run):
+        listitems = [
+            {
+                "title": app.name,
+                "status": app.status,
+                "statustext": app.status_text,
+                "icon": app.icon,
+            }
+            for app in apps
+        ]
+        logging.debug(f"Processing apps")
+        logging.debug(f"List of apps: {apps}")
+        install_alert = DialogAlert(self.lang)
+        app_install_dict = {
+            **install_alert.app_install_dict,  # Copy default values
+            "button1disabled": True,
+            "progress": f"{len(apps) * 2}",
+            "listitem": listitems,
+            "message": message,
+        }
+        logging.debug(f"Alert for {message}")
+        proc = install_alert.alert(app_install_dict, True)
+        progress = 0
+        for app in apps:
+            progress = app.install_app(
+                MESSAGE_LOCALE, self.lang, progress, install_alert
+            )
+        wait_for_thread(munki_run, install_alert)
+        time.sleep(1)
+        install_alert.update_dialog("quit")
+        proc.terminate()
+
+    def add_apps_to_self_service_manifest(self):
+        self_service_manifest = "/Library/Managed Installs/manifests/SelfServeManifest"
+        if os.path.isfile(self_service_manifest):
+            with open(self_service_manifest, "rb") as file:
+                current_apps = read_plist_value(
+                    self_service_manifest, "managed_installs"
+                )
+                current_uninstalls = read_plist_value(
+                    self_service_manifest, "managed_uninstalls"
+                )
+                # get a list of selected apps, but don't include any functions
+                selected_app_names = [
+                    app.munki_name
+                    for app in self.get_selected_apps()
+                    if not app.function
+                ]
+                apps_to_add = [
+                    app_name
+                    for app_name in selected_app_names
+                    if app_name not in current_apps
+                ]
+
+                current_apps.extend(apps_to_add)
+        else:
+            current_apps = [
+                app.munki_name for app in self.get_selected_apps() if not app.function
+            ]
+            current_uninstalls = []
+
+        with open(self_service_manifest, "wb") as file:
+            plistlib.dump(
+                {
+                    "managed_installs": current_apps,
+                    "managed_uninstalls": current_uninstalls,
+                },
+                file,
+            )
+
+
+### Bootstrapping Functions ###
+
+
+def crypt_check():
+    """Check if FileVault is enabled"""
+    crypt_output = "/private/var/root/crypt_output.plist"
+    if os.path.isfile(crypt_output):
+        logging.debug("Status: FileVault Confirmed")
+        run_subp(["/Library/Crypt/checkin"])
+    return os.path.isfile(crypt_output)
+
+
+def enable_firewall():
+    CFPreferencesSetValue(
+        "globalstate",
+        1,
+        "/Library/Preferences/com.apple.alf",
+        kCFPreferencesAnyUser,
+        kCFPreferencesAnyHost,
+    )
+    Path("/Users/Shared/.firewall_enabled").touch()
+
+
+def rename_host(user_name):
+    serial = get_serial_number()[5:8]
+    computer_name = f"{user_name}-{serial}M"
+    names = ["HostName", "ComputerName", "LocalHostName"]
+    for n in names:
+        # LocalHostName cannot contain a '.'
+        if n == "LocalHostName":
+            computer_name = computer_name.replace(".", "")
+        subprocess.check_output(["/usr/sbin/scutil", "--set", n, computer_name])
+
+
+def set_wallpaper():
+    """Sets the current users desktop to a Company Background"""
+    # Download latest version of desktoppr
+    logging.debug("Downloading desktoppr...")
+    desktoppr = "https://github.com/scriptingosx/desktoppr/releases/download/v0.4/desktoppr-0.4.pkg"
+    run_subp(["/usr/bin/curl", "-L", "-o", "/tmp/desktoppr.pkg", desktoppr])
+    # Install desktoppr
+    logging.debug("Installing desktoppr...")
+    run_subp(["/usr/sbin/installer", "-pkg", "/tmp/desktoppr.pkg", "-target", "/"])
+    # Set wallpaper
+    cmd = [
+        "/bin/launchctl",
+        "asuser",
+        str(get_console_user()[1]),
+        "sudo",
+        "-u",
+        str(get_console_user()[0]),
+        "/usr/local/bin/desktoppr",
+        "/Library/CPE/Company Wallpapers/2023_Desktop_Background.jpg",
+    ]
+    run_subp(cmd)
+    # touch file to signify complete install
+    Path("/Users/Shared/.wallpaper_set").touch()
+    return True
+
+
+### Utils ###
+
+
+def check_user_session(user_name):
+    # Making sure that the user desktop/dock is shown
+    plist_path = f"/Users/{user_name}/Library/Preferences/com.apple.dock.plist"
+
+    # wait till the file exists
+    while not os.path.exists(plist_path):
+        logging.debug(f"Waiting for {plist_path} to be created.")
+        time.sleep(1)
+
+    if os.stat(plist_path).st_uid == os.stat("/dev/console").st_uid:
+        mod_count = read_plist_value(plist_path, "mod-count")
+        seconds_waited = 0
+
+        while True:
+            if mod_count and mod_count >= 2:
+                logging.debug("Dock is set up. Continuing.")
+                return True
+
+            if seconds_waited >= 1800:
+                logging.debug("Timed out waiting for dock to be set up.")
+                return False
+
+            logging.debug(
+                f"Waiting for initial dock setup. {seconds_waited} seconds waited, mod-count is: {mod_count}."
+            )
+            time.sleep(1)
+            seconds_waited += 1
+            mod_count = read_plist_value(plist_path, "mod-count")
+
+
+def dialog_check():
+    for _ in range(300):
+        if os.path.exists(DIALOG):
+            return True
+        logging.debug("Dialog does not seem to be installed. Pausing.")
+        time.sleep(1)
+    else:
+        logging.debug("Dialog did not install within the specified time.")
+        return False
+
+
+def get_console_user(default_value=None):
+    try:
+        cfuser = SCDynamicStoreCopyConsoleUser(None, None, None)
+        logging.debug(f"Console user: {cfuser}")
+        return cfuser
+    except Exception as e:
+        logging.warn(f"Error retrieving console user: {e}")
+        return default_value
+
+
+def get_language():
+    """
+    Returns the locale of the current user.
+    Returns results in a string.
+    """
+    # Get the preferred language of the user.
+    language = NSLocale.preferredLanguages()[0]
+
+    # Map the language codes to a standardized format using a dictionary.
+    language_map = {
+        "fr": "fr",
+        "en-CA": "gb",
+        "en-GB": "gb",
+        "en-IR": "gb",
+    }
+
+    # Return the standardized language code.
+    return language_map.get(language, "en")
+
+
+def get_os_version():
+    try:
+        logging.debug(f"OS Version: {platform.mac_ver()[0]}")
+        return MunkiLooseVersion(platform.mac_ver()[0])
+    except Exception as e:
+        logging.warn(f"Error retrieving OS version: {e}")
+        return None
+
+
+def get_serial_number():
+    """Get system serial number."""
+    # Credit to Mike Lynn
+    # https://gist.github.com/pudquick/c7dd1262bd81a32663f0#gistcomment-3090863
+    IOKit_bundle = NSBundle.bundleWithIdentifier_("com.apple.framework.IOKit")
+
+    functions = [
+        ("IOServiceGetMatchingService", b"II@"),
+        ("IOServiceMatching", b"@*"),
+        ("IORegistryEntryCreateCFProperty", b"@I@@I"),
+    ]
+
+    loadBundleFunctions(IOKit_bundle, globals(), functions)
+
+    serial = IORegistryEntryCreateCFProperty(
+        IOServiceGetMatchingService(
+            0, IOServiceMatching("IOPlatformExpertDevice".encode("utf-8"))
+        ),
+        NSString.stringWithString_("IOPlatformSerialNumber"),
+        None,
+        0,
+    )
+    return serial
+
+
+def munki_launchd(userid, option="load"):
+    """
+    Load or unload the Munki daemons and agents.
+
+    Args:
+        userid (str): The user ID to use when launching the agents.
+        option (str, optional): The launchctl option to use. Defaults to "load".
+
+    Returns:
+        None
+    """
+    daemons = [
+        "logouthelper",
+        "managedsoftwareupdate-check",
+        "managedsoftwareupdate-install",
+        "managedsoftwareupdate-manualcheck",
+    ]
+    agents = ["ManagedSoftwareCenter", "munki-notifier"]
+
+    for daemon in daemons:
+        run_subp(
+            [
+                "/bin/launchctl",
+                option,
+                f"/Library/LaunchDaemons/com.googlecode.munki.{daemon}.plist",
+            ]
+        )
+
+    for agent in agents:
+        run_subp(
+            [
+                "/bin/launchctl",
+                "asuser",
+                userid,
+                "/bin/launchctl",
+                option,
+                f"/Library/LaunchAgents/com.googlecode.munki.{agent}.plist",
+            ]
+        )
+
+
+def logout(userid):
+    try:
+        logging.debug(f"Logging out user {userid}")
+        run_subp(["/bin/launchctl", "bootout", f"gui/{userid}"])
+    except Exception as e:
+        logging.warn(f"Error logging out user {userid}: {e}")
+
+
+def read_plist_value(plist_path, key):
+    with open(plist_path, "rb") as f:
+        plist_data = plistlib.load(f)
+    try:
+        value = plist_data.get(key)
+    except KeyError:
+        value = ""
+    return value
+
+
+def run_munki(manifest=None):
+    """Run munki check to download applications."""
+    logging.debug("Downloading munki software...")
+    cmd = [
+        "/usr/local/munki/managedsoftwareupdate",
+        "--checkonly",
+    ]
+    if manifest:
+        cmd.extend(["--munkipkgsonly", f"--id={manifest}"])
+    results = run_subp(cmd)
+    if not results["success"]:
+        logging.debug(f"munki download failed : {results['stderr']}")
+        return False
+    logging.debug("Munki check was successful")
+    logging.debug("Installing munki software...")
+    cmd = [
+        "/usr/local/munki/managedsoftwareupdate",
+        "--installonly",
+    ]
+    if manifest:
+        cmd.extend(["--munkipkgsonly", f"--id={manifest}"])
+    logging.debug(f"Running {cmd}")
+    i = 1
+    while i < 4:
+        results = run_subp(cmd)
+        if results["success"]:
+            break
+        logging.debug(f"munki run number {i} failed: {results['stderr']}")
+        i += 1
+    if not results["success"]:
+        logging.debug(f"Output: {results['stdout']}")
+        logging.debug(f"Error output: {results['stderr']}")
+        logging.debug("Munki installation failed")
+        return False
+    logging.debug("Munki installation was successful")
+    return True
+
+
+def run_subp(command, input=None):
+    """
+    Run a subprocess.
+    Command must be an array of strings, allows optional input.
+    Returns results in a dictionary.
+    """
+    # Validate that command is not a string
+    if isinstance(command, str):
+        # Not an array!
+        logging.debug("TypeError in cmd")
+        raise TypeError("Command must be an array")
+
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    (out, err) = proc.communicate(input)
+    result_dict = {
+        "stdout": out,
+        "stderr": err,
+        "status": proc.returncode,
+        "success": True if proc.returncode == 0 else False,
+    }
+    return result_dict
+
+
+def setup_logging():
+    log_file = f"{FILE_LOCATION}Logs/bootstrap-dialog.log"
+    directory = os.path.dirname(log_file)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    logger = logging.getLogger(__name__)
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(levelname)-8s: %(asctime)s %(module)-20s: %(message)s",
+        datefmt="%Y/%m/%d %H:%M:%S",
+        filename=log_file,
+        filemode="w",
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(levelname)-8s %(module)-20s:  %(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger("").addHandler(console)
+
+
+def wait_for_thread(future, alert, sleep_time=1):
+    """Wait for a thread to finish"""
+    alert.update_dialog("progresstext", "Finalizing configurations")
+    while future.running():
+        logging.debug("Munki is still running")
+        time.sleep(sleep_time)
+    alert.update_dialog("progress", 100)
+
+
+### Steps ###
+
+
+def first_step(lang):
+    welcome = DialogAlert(lang=lang)
+    welcome.content_dict.update(
+        {
+            "video": "youtubeid=pg5P69Hzsbg",
+            "autoplay": "1",
+            "height": "589",
+            "title": "Welcome to Company! Please wait while we get a few things ready.",
+            "titlefont": "size=24,weight=thin",
+            "button1text": "Skip Intro",
+            "timer": "22",
+            "hidetimerbar": "1",
+        }
+    )
+    logging.debug("Showing Welcome")
+    welcome.alert(welcome.content_dict)
+
+
+def optional_software_step(lang, apps):
+    app_chooser = DialogAlert(lang)
+
+    # Create a new dictionary with default values
+    app_install_dict = {
+        **app_chooser.app_install_dict,  # Copy default values
+        "button1text": MESSAGE_LOCALE[lang]["continue"],
+        "button2text": MESSAGE_LOCALE[lang]["skip_optional_installs"],
+        "timer": "580",
+        "messagefont": "size=14",
+        "messageposition": "top",
+        "checkbox": apps.get_optional_apps(),
+        "checkboxstyle": {
+            "style": "switch",
+            "size": "small",
+        },
+        "message": MESSAGE_LOCALE[lang]["message_optional"],
+    }
+
+    logging.debug("Alert for optional software")
+
+    results = app_chooser.alert(app_install_dict)
+
+    choosen_apps = {}
+    if results["status"] == 0:
+        stdout = results["stdout"].decode("utf-8")
+        limiter = stdout.find("{\n  ")
+        choosen_apps = json.loads(stdout[limiter:])
+        logging.debug(f"Subprocess stdout cleaned: {choosen_apps}")
+        logging.debug("User has selected continue")
+    # Timer set for 10 minutes, if user doesn't select, we will install the defaults.
+    elif results["status"] == 4:
+        logging.debug("User has reached the timeout, moving on with defaults.")
+        for app in apps.get_optional_apps():
+            logging.debug(f"Adding {app} to the install list")
+            apps.change_app_value(app, "selected", True)
+
+    for app, result in choosen_apps.items():
+        if result:
+            logging.debug(f"Adding {app} to the install list")
+            apps.change_app_value(app, "selected", True)
+
+
+def final_step(lang, userid):
+    final_step = DialogAlert(lang)
+    logging.debug("Loading munki")
+    munki_launchd(str(userid), "load")
+    if crypt_check():
+        final_step.content_dict["button1text"] = MESSAGE_LOCALE[lang]["close"]
+        final_step.content_dict["button2text"] = MESSAGE_LOCALE[lang]["msc"]
+        final_step.content_dict["infobuttontext"] = MESSAGE_LOCALE[lang][
+            "infobuttontext"
+        ]
+        final_step.content_dict["infobuttonaction"] = "beyond-identity-endpoint://open"
+        final_step.content_dict["message"] = MESSAGE_LOCALE[lang]["message_final"]
+        final_step_result = final_step.alert(final_step.content_dict)
+        if final_step_result["status"] == 2:
+            os.system("open /Applications/Managed\ Software\ Center.app")
+    else:
+        final_step.content_dict["button1text"] = MESSAGE_LOCALE[lang]["log_out"]
+        final_step.content_dict["message"] = MESSAGE_LOCALE[lang][
+            "message_final_logout"
+        ]
+        final_step_result = final_step.alert(final_step.content_dict)
+        if final_step_result["status"] == 0:
+            logout(userid)
+
+
+### Main ###
+
+
+def bootstrap():
+    if get_os_version() < MunkiLooseVersion("11"):
+        logging.debug("Not compatible with Catalina and below, please upgrade.")
+        sys.exit(1)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        required_munki_run = executor.submit(run_munki, "bootstrap-test")
+
+        while True:
+            user_name, userid, _ = get_console_user()
+            if user_name and user_name not in ["root", "loginwindow", "_mbsetupuser"]:
+                break
+            logging.debug("Waiting for user to login")
+            time.sleep(1)
+
+        if not check_user_session(user_name):
+            logging.warn("User session not found. Exiting.")
+            sys.exit(1)
+
+        if not dialog_check():
+            logging.warn("Dialog not found. Exiting.")
+            sys.exit(1)
+
+        rename_host(user_name)
+
+        # We need to unload munki in case it is running
+        # Not an issue for new installs, but can be for existing machines
+        logging.debug("Unloading munki")
+        munki_launchd(str(userid), "unload")
+
+        lang = get_language()
+        # Create the applications instance
+        apps = Applications(lang)
+
+        first_step(lang)
+
+        apps.process_apps(
+            apps.get_required_apps(),
+            MESSAGE_LOCALE[lang]["message_required"],
+            required_munki_run,
+        )
+
+    optional_software_step(lang, apps)
+
+    selected_apps = apps.get_selected_apps()
+
+    if selected_apps:
+        logging.debug("Updating the self service manifest")
+        apps.add_apps_to_self_service_manifest()
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            optional_munki_run = executor.submit(run_munki)
+            apps.process_apps(
+                selected_apps,
+                MESSAGE_LOCALE[lang]["install_selected"],
+                optional_munki_run,
+            )
+            final_step(lang, userid)
+    else:
+        # The first munki run takes awhile to download icons and catalogs
+        # This will queue everything up if the user wishes to open MSC
+        logging.debug("Running munki")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            optional_munki_run = executor.submit(run_munki)
+            final_step(lang, userid)
+
+
+if __name__ == "__main__":
+    setup_logging()
+    try:
+        bootstrap()
+    except Exception as e:
+        logging.error(e)
+        sys.exit(1)
