@@ -1,6 +1,6 @@
 #!/bin/zsh
 
-launchd_plist_name='com.unity3d.itops.mdm_check'
+launchd_plist_name='com.company.itops.mdm_check'
 
 /bin/mkdir -p "/Library/CPE/Logs"
 /bin/chmod -R 777 "/Library/CPE/Logs"
